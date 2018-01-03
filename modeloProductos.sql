@@ -1,0 +1,200 @@
+/* Hemos comprobado revisando la tabla que en el campo PRODUCT_COUNTRY el valor que viene como United States no lo tenemos
+referencia en nuestra dimension de paises como tal sino como US, asumimos que es un error y lo sustituimos por US
+Antes nos aseguramos que el unico valor de pais es United States*/
+
+SELECT DISTINCT TRIM(PRODUCT_COUNTRY) FROM STAGE.STG_PRODUCTOS_CRM
+WHERE LENGTH(TRIM(PRODUCT_COUNTRY)) <> 0;
+
+/*Efectivamente nos da como unico valor United States y procedemos a actualizarlo*/
+
+UPDATE STAGE.STG_PRODUCTOS_CRM SET PRODUCT_COUNTRY = 'US'
+WHERE LENGTH(TRIM(PRODUCT_COUNTRY)) <> 0;
+
+COMMIT;
+
+/* La tabla STAGE.STG_PRODUCTOS_CRM tiene muchos registros en los que la descripcion del producto es la misma en cambio el
+product_id es distinto para la misma descripcion, por ello como no tenemos un product_id unico por producto creamos una
+dimension con un identificador unico por producto que generamos con un AUTO_INCREMENT.
+Simpre se agregan los registro de 'DECONOCIDO' Y 'NO APLICA' por si en un futuro vienese un registro con el product_name sin
+rellenar podamos asignarselo a su registro correspondiente en la dimension
+*/
+INSERT INTO ODS.ODS_DM_PRODUCTOS (DE_PRODUCTO, FC_INSERT, FC_MODIFICACION)
+SELECT DISTINCT UPPER(TRIM(PRODUCT_NAME)), 
+ NOW(),
+ NOW()
+FROM STAGE.STG_PRODUCTOS_CRM PROD
+WHERE LENGTH(TRIM(PRODUCT_NAME)) <> 0;
+
+INSERT INTO ODS.ODS_DM_PRODUCTOS VALUES (99, 'DESCONOCIDO', NOW(), NOW());
+INSERT INTO ODS.ODS_DM_PRODUCTOS VALUES (98, 'NO APLICA', NOW(), NOW());
+
+COMMIT;
+ANALYZE TABLE ODS.ODS_DM_PRODUCTOS;
+
+/* En la tabla STAGE.STG_PRODUCTOS_CRM vienen los canales, no tenemos mas informacion de ellos salvo este codigo, 
+creamos una de dimension maestra con los canales encontrados.
+Simpre se agregan los registro de 'DECONOCIDO' Y 'NO APLICA' ya que vienen registros con el channel
+sin rellenar y asi podamos asignarselo a su registro correspondiente en la dimension
+*/
+
+INSERT INTO ODS.ODS_DM_CANALES (DE_CANAL, FC_INSERT, FC_MODIFICACION)
+SELECT DISTINCT UPPER(TRIM(CHANNEL)) DE_CANAL,
+ NOW(),
+ NOW()
+FROM STAGE.STG_PRODUCTOS_CRM PROD
+WHERE LENGTH(TRIM(CHANNEL)) <> 0;
+
+INSERT INTO ODS.ODS_DM_CANALES VALUES (99, 'DESCONOCIDO', NOW(), NOW());
+INSERT INTO ODS.ODS_DM_CANALES VALUES (98, 'NO APLICA', NOW(), NOW());
+
+COMMIT;
+ANALYZE TABLE ODS.ODS_DM_CANALES;
+
+/* Nos encontramos con ciudades y estados que no tenemos registradas en nuestra dimension ODS.ODS_DM_CIUDADES_ESTADOS,
+procedemos a insertarlas en nuestra dimension para que consten, teniendo en cuenta que podemos tener ciudades sin estados 
+y estados sin ciudades y no encontraramos su pais correspondiente, utilizo tabla temporal para guardar los posibles registros a insertar*/
+
+DROP TABLE IF EXISTS ODS.TMP_CIUDADES_ESTADOS;
+CREATE TABLE ODS.TMP_CIUDADES_ESTADOS AS
+SELECT DISTINCT CASE WHEN LENGTH(TRIM(PRODUCT_CITY))<>0 THEN UPPER(TRIM(PRODUCT_CITY)) ELSE 'DESCONOCIDO' END DE_CIUDAD,
+			CASE WHEN LENGTH(TRIM(PRODUCT_STATE))<>0 THEN UPPER(TRIM(PRODUCT_STATE)) ELSE 'DESCONOCIDO' END DE_ESTADO,
+			CASE WHEN LENGTH(TRIM(PRODUCT_COUNTRY))<>0 THEN UPPER(TRIM(PRODUCT_COUNTRY)) ELSE 'DESCONOCIDO' END DE_PAIS
+			FROM STAGE.STG_PRODUCTOS_CRM PROD;
+            
+/* Compruebo si hay ciudades estados con pais que esten en productos pero no en la dimension de ODS.ODS_DM_CIUDADES_ESTADOS */
+DROP TABLE IF EXISTS ODS.TMP_CIUDADES_ESTADOS2;
+CREATE TABLE ODS.TMP_CIUDADES_ESTADOS2 AS
+SELECT TMP.DE_CIUDAD CIUDAD,
+TMP.DE_ESTADO ESTADO,
+PAI.ID_PAIS PAIS 
+FROM ODS.ODS_DM_CIUDADES_ESTADOS CIU
+RIGHT JOIN ODS.TMP_CIUDADES_ESTADOS TMP ON TMP.DE_CIUDAD = CIU.DE_CIUDAD AND TMP.DE_ESTADO = CIU.DE_ESTADO
+INNER JOIN ODS.ODS_DM_PAISES PAI ON PAI.DE_PAIS = TMP.DE_PAIS
+WHERE CIU.ID_CIUDAD_ESTADO IS NULL;
+
+/* Inserto en productos las posible ciudades y estados que no estuvieran en la dimension */
+INSERT INTO ODS.ODS_DM_CIUDADES_ESTADOS (DE_CIUDAD, DE_ESTADO, ID_PAIS, FC_INSERT, FC_MODIFICACION)
+SELECT TMP2.CIUDAD DE_CIUDAD,
+TMP2.ESTADO DE_ESTADO,
+TMP2.PAIS ID_PAIS,
+NOW(),
+NOW()
+FROM ODS.TMP_CIUDADES_ESTADOS2 TMP2;
+
+COMMIT;
+ANALYZE TABLE ODS.ODS_DM_CIUDADES_ESTADOS;
+
+DROP TABLE IF EXISTS ODS.TMP_CIUDADES_ESTADOS;
+DROP TABLE IF EXISTS ODS.TMP_CIUDADES_ESTADOS2;
+
+/* Comprobamos si tenemos direcciones en productos que no esten en la dimension de ods, si es asi las insertamos */
+DROP TABLE IF EXISTS ODS.TMP_DIRECCIONES;
+CREATE TABLE ODS.TMP_DIRECCIONES AS
+SELECT DISTINCT 
+	CASE WHEN LENGTH(TRIM(PRODUCT_ADDRESS)) <> 0 THEN UPPER(TRIM(PRODUCT_ADDRESS)) ELSE 'DESCONOCIDO' END DE_DIRECCION,
+	CASE WHEN LENGTH(TRIM(PRODUCT_POSTAL_CODE)) <> 0 THEN TRIM(PRODUCT_POSTAL_CODE) ELSE 99999 END DE_CP,
+    CIU.ID_CIUDAD_ESTADO ID_CIUDAD_ESTADO
+FROM STAGE.STG_PRODUCTOS_CRM PROD
+LEFT JOIN ODS.ODS_HC_DIRECCIONES DIR ON CASE WHEN LENGTH(TRIM(PROD.PRODUCT_ADDRESS)) <> 0 THEN UPPER(TRIM(PROD.PRODUCT_ADDRESS)) ELSE 'DESCONOCIDO' END = DIR.DE_DIRECCION
+	AND CASE WHEN LENGTH(TRIM(PROD.PRODUCT_POSTAL_CODE)) <> 0 THEN TRIM(PROD.PRODUCT_POSTAL_CODE) ELSE 99999 END = DIR.DE_CP
+LEFT JOIN ODS.ODS_DM_CIUDADES_ESTADOS CIU ON CASE WHEN LENGTH(TRIM(PROD.PRODUCT_CITY)) <> 0 THEN UPPER(TRIM(PROD.PRODUCT_CITY)) ELSE 'DESCONOCIDO' END = CIU.DE_CIUDAD
+	AND CASE WHEN LENGTH(TRIM(PROD.PRODUCT_STATE)) <> 0 THEN UPPER(TRIM(PROD.PRODUCT_STATE)) ELSE 'DESCONOCIDO' END = CIU.DE_ESTADO
+LEFT JOIN ODS.ODS_DM_PAISES PAI ON CASE WHEN LENGTH(TRIM(PROD.PRODUCT_COUNTRY)) <> 0 THEN UPPER(TRIM(PROD.PRODUCT_COUNTRY)) ELSE 'DESCONOCIDO' END = PAI.DE_PAIS
+;  
+
+/* Insertamos desde tabla temporal en dimension direcciones */
+INSERT INTO ODS.ODS_HC_DIRECCIONES (DE_DIRECCION, DE_CP, ID_CIUDAD_ESTADO, FC_INSERT, FC_MODIFICACION)
+SELECT 
+DE_DIRECCION,
+DE_CP,
+ID_CIUDAD_ESTADO,
+NOW() FC_INSERT,
+NOW() FC_MODIFICACION
+FROM ODS.TMP_DIRECCIONES;
+
+ANALYZE TABLE ODS.ODS_HC_DIRECCIONES;
+DROP TABLE IF EXISTS ODS.TMP_DIRECCIONES;
+
+/*Ahora vamos a ver que clientes tenemeos en productos que no tengamos en nuestra dimension de clientes para insertarlos
+/* Con esta consulta vemos cuantos clientes de la tabla de productos encontramos en nuestra tabla de clientes
+en ODS, nos devuelve 7998*/
+
+SELECT COUNT(*) FROM (
+select DISTINCT TRIM(SPROD.CUSTOMER_ID)
+from STAGE.STG_PRODUCTOS_CRM SPROD
+INNER JOIN ODS.ODS_HC_CLIENTES CLI ON CLI.ID_CLIENTE = TRIM(SPROD.CUSTOMER_ID)
+WHERE LENGTH(TRIM(SPROD.CUSTOMER_ID)) <> 0
+) A;
+
+/*Vemos cuantos clientes distintos hay en la tabla productos y nos salen 8001
+con lo cual hay 3 clientes de productos que no estan en la tabla clientes */
+SELECT COUNT(DISTINCT CUSTOMER_ID)
+FROM STAGE.STG_PRODUCTOS_CRM 
+WHERE LENGTH(TRIM(CUSTOMER_ID)) <> 0;
+
+
+/*Obtenemos los clientes de PRODUCTOS que no estan en ODS.ODS_HC_CLIENTES
+los clientes son: 16689, 10000, 14826 */
+DROP TABLE IF EXISTS ODS.TMP_CLIENTES_PRODUCTOS;
+CREATE TABLE ODS.TMP_CLIENTES_PRODUCTOS AS
+SELECT DISTINCT TRIM(CUSTOMER_ID) CLIENTE
+FROM STAGE.STG_PRODUCTOS_CRM SPROD
+LEFT JOIN ODS.ODS_HC_CLIENTES CLI ON TRIM(SPROD.CUSTOMER_ID) = CLI.ID_CLIENTE
+WHERE CLI.ID_CLIENTE IS NULL;
+
+COMMIT;
+ANALYZE TABLE ODS.TMP_CLIENTES_PRODUCTOS;
+
+/* Insertamos en la dimension de clientes los clientes, aqui nos surge una problematica que es la siguiente:
+he comprobado que estos tres clientes en la tabla de STG_PRODUCTOS_CRM tienen direcciones, ciudades y estados distintos
+para un mismo cliente, en la dimension ODS_HC_CLIENTES tenemos tan solo un ID_DIRECCION con lo cual solo se podria referenciar una
+sola direccion. Deberemos asumir que la direccion de la dimension ODS_HC_CLIENTES es una direccion de cabecera o principal y en cambio
+las que tiene asignadas en STG_PRODUCTOS_CRM son de instalaciones de los productos-servicios correspondientes. Como para estos clientes que
+hay que dar de alta no me puedo quedar con ninguna direccion pues le asigno la DESCONOCIDA, en cambio cuando cargue ODS_SERVICIOS si que le
+asignare la direccion del clientes que viene en STG_PRODUCTOS_CRM que es donde suponemos se produjo la instalacion del producto-servicio*/
+INSERT INTO ODS.ODS_HC_CLIENTES
+SELECT CLIENTE AS ID_CLIENTE,
+'DESCONOCIDO' NOMBRE_CLIENTE,
+'DESCONOCIDO' APELLIDOS_CLIENTE,
+'99-999-9999' NUMDOC_CLIENTE,
+99 ID_SEXO,
+999999 ID_DIRECCION,
+9999999999 TELEFONO_CLIENTE,
+'DESCONOCIDO' EMAIL,
+STR_TO_DATE('31/12/9999','%d/%m/%Y') FC_NACIMIENTO,
+999 ID_PROFESION,
+999 ID_COMPANYA,
+NOW() FC_INSERT,
+NOW() FC_MODIFICACION
+FROM ODS.TMP_CLIENTES_PRODUCTOS;
+
+COMMIT;
+DROP TABLE IF EXISTS ODS.TMP_CLIENTES_PRODUCTOS;
+
+/* Para hacer las averiguaciones expuestas antes, las de que el mismo cliente que esta en productos tiene varias direcciones distintas y que no
+esta dado de alta en la dimension clientes utilize las siguientes consultas:
+
+DROP TABLE IF EXISTS ODS.TMP_CLIENTES_PRODUCTOS;
+CREATE TABLE ODS.TMP_CLIENTES_PRODUCTOS AS
+SELECT DISTINCT TRIM(CUSTOMER_ID) CUSTOMER_ID,
+PRODUCT_ADDRESS PRODUCT_ADDRESS,
+PRODUCT_POSTAL_CODE PRODUCT_POSTAL_CODE,
+PRODUCT_CITY PRODUCT_CITY,
+PRODUCT_STATE PRODUCT_STATE,
+PRODUCT_COUNTRY PRODUCT_COUNTRY
+FROM STAGE.STG_PRODUCTOS_CRM SPROD
+LEFT JOIN ODS.ODS_HC_CLIENTES CLI ON TRIM(SPROD.CUSTOMER_ID) = CLI.ID_CLIENTE
+WHERE CLI.ID_CLIENTE IS NULL;
+
+COMMIT;
+ANALYZE TABLE ODS.TMP_CLIENTES_PRODUCTOS;
+
+SELECT TMPCLI.CUSTOMER_ID, 
+DIR.ID_DIRECCION
+FROM ODS.TMP_CLIENTES_PRODUCTOS TMPCLI
+INNER JOIN ODS.ODS_HC_DIRECCIONES DIR ON CASE WHEN LENGTH(TRIM(TMPCLI.PRODUCT_ADDRESS)) <> 0 THEN UPPER(TRIM(TMPCLI.PRODUCT_ADDRESS)) ELSE 'DESCONOCIDO' END = DIR.DE_DIRECCION
+	AND CASE WHEN LENGTH(TRIM(TMPCLI.PRODUCT_POSTAL_CODE)) <> 0 THEN TRIM(TMPCLI.PRODUCT_POSTAL_CODE) ELSE 99999 END = DIR.DE_CP
+INNER JOIN ODS.ODS_DM_CIUDADES_ESTADOS CIU ON CASE WHEN LENGTH(TRIM(TMPCLI.PRODUCT_CITY)) <> 0 THEN UPPER(TRIM(TMPCLI.PRODUCT_CITY)) ELSE 'DESCONOCIDO' END = CIU.DE_CIUDAD
+	AND CASE WHEN LENGTH(TRIM(TMPCLI.PRODUCT_STATE)) <> 0 THEN UPPER(TRIM(TMPCLI.PRODUCT_STATE)) ELSE 'DESCONOCIDO' END = CIU.DE_ESTADO
+INNER JOIN ODS.ODS_DM_PAISES PAI ON CASE WHEN LENGTH(TRIM(TMPCLI.PRODUCT_COUNTRY)) <> 0 THEN UPPER(TRIM(TMPCLI.PRODUCT_COUNTRY)) ELSE 'DESCONOCIDO' END = PAI.DE_PAIS;
+*/
