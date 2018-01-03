@@ -1,4 +1,6 @@
 # Practica-Data-101
+El desarrollo de la practica esta en el powerpoint Data 101.pptx
+
 Para ejecutar o seguir el orden de los archivos .sql:
 
 1.- crearServicios.sql
